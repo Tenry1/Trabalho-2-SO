@@ -200,14 +200,15 @@ void run_simulation_logic(ReplacementAlgo algo, int num_procs, const int mem_siz
     // This pointer keeps track of where we are in the execution list
     int execution_pointer = 0;
 
-    // The example output shows that the first instruction is processed before time 0
+    // The simulation output format expects the first instruction to be processed before the main loop starts,
+    // This ensures that the first process's first page is loaded into memory and appears in the initial state printout.
     if (trace_len > 0) {
         int first_pid = exec_trace[execution_pointer];
         int first_address = exec_trace[execution_pointer + 1];
         int first_page = first_address / PAGE_SIZE;
-        // Load the first page into the first frame (F0) at time 0
+        // Place the first page of the first process into the first physical frame (frame 0) at time 0.
         load_page_into_frame(0, first_pid, first_page, 0);
-        // Move the pointer to the next instruction
+        // Advance the instruction pointer so the main loop starts with the next instruction.
         execution_pointer = execution_pointer + 2;
     }
 
