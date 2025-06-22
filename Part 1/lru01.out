@@ -1,7 +1,0 @@
-time inst proc1              proc2              proc3              proc4              proc5             
-0                                               F0                                                      
-1                                               F0                                    F1                
-2                                               F0                                    F1                
-3                                               F0                 F2                 F1                
-4                                               F0,F3              F2                 F1                
-5                                               F0,F3              F2                 F1,F4             
