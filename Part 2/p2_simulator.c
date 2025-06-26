@@ -96,7 +96,7 @@ void execute_instruction(PCB* process, MemoryManager* mm, Scheduler* sched) {
             process->time_left = 3;
             return;
         }
-        handle_memory_access(process, mm, address);
+        handle_memory_access(process, mm, address, sched);
     }
     else if (instruction >= 1000000000 && instruction <= 2109999999) { // SWAP/MEMCPY
         // Extract addresses
@@ -110,10 +110,10 @@ void execute_instruction(PCB* process, MemoryManager* mm, Scheduler* sched) {
         }
 
         // Handle both addresses
-        handle_memory_access(process, mm, addr1);
+        handle_memory_access(process, mm, addr1, sched);
         if (process->state == SIGSEGV) return;
 
-        handle_memory_access(process, mm, addr2);
+        handle_memory_access(process, mm, addr2,sched);
     }
     else { // Other instructions from projeto_SO
         // For simplicity, we'll just advance PC
@@ -128,7 +128,7 @@ void execute_instruction(PCB* process, MemoryManager* mm, Scheduler* sched) {
     }
 }
 
-void handle_memory_access(PCB* process, MemoryManager* mm, int address) {
+void handle_memory_access(PCB* process, MemoryManager* mm, int address, Scheduler* sched) {
     int page_number = address / PAGE_SIZE;
 
     // Check if page is loaded
