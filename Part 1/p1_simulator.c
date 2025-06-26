@@ -133,7 +133,7 @@ void print_state(int current_time, int num_procs) {
         char string_for_this_column[100];
         strcpy(string_for_this_column, ""); // Make sure the string is empty to start
         
-        // CHeck if the proccess has terminated duo to segmentation fault
+        // CHeck if the proccess has terminated due to segmentation fault
         ProcessInfo current_process_info = processes[i-1];
         if (current_process_info.terminated == true) {
             // Only print SIGSEGV one time
