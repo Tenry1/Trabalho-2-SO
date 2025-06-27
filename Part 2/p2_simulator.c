@@ -1,366 +1,385 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <limits.h>
 #include "p2_simulator.h"
 
-void initialize_memory(MemoryManager* mm) {
-    mm->total_frames = MAX_FRAMES;
-    mm->free_frames = MAX_FRAMES;
-    mm->clock = 0;
+// --- FORWARD DECLARATIONS ---
+static PCB* create_new_process(SimulationSystem* system, int prog_id);
+static void set_process_error(PCB* proc, const char* error_code);
+static void schedule_next_process(SimulationSystem* system);
+static int find_free_frame(SimulationSystem* system);
+static int find_victim_lru(SimulationSystem* system);
+void execute_running_process(SimulationSystem* system);
 
-    for (int i = 0; i < MAX_FRAMES; i++) {
-        mm->frames[i].frame_id = i;
-        mm->frames[i].free = true;
-        mm->frames[i].pid = -1;
-        mm->frames[i].page_number = -1;
-        mm->frames[i].last_used = -1;
+// =================================================================
+//                    INITIALIZATION & CLEANUP
+// =================================================================
+
+void initialize_system(SimulationSystem* system, int (*input_programs)[20], int num_rows) {
+    memset(system, 0, sizeof(SimulationSystem));
+    system->current_time = 0;
+    system->next_pid = 1;
+
+    system->new_queue = createQueue();
+    system->ready_queue = createQueue();
+    system->blocked_queue = createQueue();
+    system->exit_queue = createQueue();
+
+    for (int i = 0; i < NUM_FRAMES; i++) {
+        system->physical_memory[i].frame_id = i;
+        system->physical_memory[i].process_id = -1;
     }
+
+    for (int i = 0; i < MAX_PROGRAMS; i++) {
+        system->program_mem_sizes[i] = input_programs[0][i];
+        system->program_lengths[i] = 0;
+        system->program_has_halt[i] = false;
+
+        for (int j = 0; j < num_rows - 1 && j < MAX_PROG_LEN; j++) {
+            int instruction = input_programs[j + 1][i];
+            system->programs[i][j] = instruction;
+            if (instruction == 0 && !system->program_has_halt[i]) {
+                system->program_lengths[i] = j + 1;
+                system->program_has_halt[i] = true;
+            }
+        }
+        if (!system->program_has_halt[i]) {
+            system->program_lengths[i] = num_rows - 1;
+        }
+    }
+    create_new_process(system, 1);
 }
 
-void initialize_scheduler(Scheduler* sched) {
-    sched->process_count = 0;
-    sched->current_process = NULL;
-
+void cleanup_system(SimulationSystem* system) {
     for (int i = 0; i < MAX_PROCESSES; i++) {
-        sched->processes[i] = NULL;
+        if (system->processes[i]) {
+            free(system->processes[i]->instructions);
+            free(system->processes[i]);
+        }
     }
+    deleteQueue(system->new_queue);
+    deleteQueue(system->ready_queue);
+    deleteQueue(system->blocked_queue);
+    deleteQueue(system->exit_queue);
 }
 
-PCB* create_process(int pid, int address_space, int* program, int program_size) {
-    PCB* process = (PCB*)malloc(sizeof(PCB));
-    process->pid = pid;
-    process->state = NEW;
-    process->pc = 0;
-    process->address_space = address_space;
-    process->time_left = 0;
-    process->last_used_time = 0;
+// =================================================================
+//                      MAIN SIMULATION LOOP (Based on Assignment 1)
+// =================================================================
 
-    // Copy program
-    process->program = (int*)malloc(program_size * sizeof(int));
-    memcpy(process->program, program, program_size * sizeof(int));
-    process->program_size = program_size;
+void run_simulation(SimulationSystem* system) {
+    print_header();
 
-    // Initialize page table
-    int page_count = (address_space + PAGE_SIZE - 1) / PAGE_SIZE;
-    process->page_table.entries = (PageTableEntry*)malloc(page_count * sizeof(PageTableEntry));
-    process->page_table.page_count = page_count;
+    for (system->current_time = 1; system->current_time <= MAX_TIME; system->current_time++) {
+        // Print the state at the beginning of the tick
+        print_system_state(system);
 
-    for (int i = 0; i < page_count; i++) {
-        process->page_table.entries[i].frame_number = -1;
-        process->page_table.entries[i].valid = false;
-        process->page_table.entries[i].dirty = false;
-    }
+        // Update processes in timed states first, potentially adding them to the READY queue
+        update_blocked_processes(system);
+        update_new_processes(system);
+        update_exit_processes(system);
 
-    // Initialize page access times
-    process->page_access_times = (int*)malloc(page_count * sizeof(int));
-    for (int i = 0; i < page_count; i++) {
-        process->page_access_times[i] = -1;
-    }
-
-    return process;
-}
-
-void free_process(PCB* process) {
-    free(process->program);
-    free(process->page_table.entries);
-    free(process->page_access_times);
-    free(process);
-}
-
-void execute_instruction(PCB* process, MemoryManager* mm, Scheduler* sched) {
-    int instruction = process->program[process->pc];
-
-    if (instruction == 0) { // HALT
-        process->state = EXIT;
-        process->time_left = 3;
-    }
-    else if (instruction >= 1 && instruction <= 100) { // JUMPF
-        int jump = instruction % 100;
-        if (process->pc + jump >= process->program_size) {
-            process->state = SIGILL;
-            process->time_left = 3;
-            return;
-        }
-        process->pc += jump;
-    }
-    else if (instruction >= 101 && instruction <= 199) { // JUMPB
-        int jump = instruction % 100;
-        if (process->pc - jump < 0) {
-            process->state = SIGILL;
-            process->time_left = 3;
-            return;
-        }
-        process->pc -= jump;
-    }
-    else if (instruction >= 1000 && instruction <= 15999) { // LOAD/STORE
-        int address = instruction - 1000;
-        if (address >= process->address_space) {
-            process->state = SIGSEGV;
-            process->time_left = 3;
-            return;
-        }
-        handle_memory_access(process, mm, address, sched);
-    }
-    else if (instruction >= 1000000000 && instruction <= 2109999999) { // SWAP/MEMCPY
-        // Extract addresses
-        int addr1 = (instruction / 100000) % 100000 - 10000;
-        int addr2 = instruction % 100000;
-
-        if (addr1 >= process->address_space || addr2 >= process->address_space) {
-            process->state = SIGSEGV;
-            process->time_left = 3;
-            return;
+        // If a process is running, execute its instruction for this tick
+        if (system->running_process) {
+            execute_running_process(system);
         }
 
-        // Handle both addresses
-        handle_memory_access(process, mm, addr1, sched);
-        if (process->state == SIGSEGV) return;
-
-        handle_memory_access(process, mm, addr2,sched);
-    }
-    else { // Other instructions from projeto_SO
-        // For simplicity, we'll just advance PC
-        process->pc++;
-    }
-
-    // Check for program end
-    if (process->pc >= process->program_size && process->state != EXIT &&
-        process->state != SIGSEGV && process->state != SIGILL) {
-        process->state = SIGEOF;
-        process->time_left = 3;
-    }
-}
-
-void handle_memory_access(PCB* process, MemoryManager* mm, int address, Scheduler* sched) {
-    int page_number = address / PAGE_SIZE;
-
-    // Check if page is loaded
-    if (!process->page_table.entries[page_number].valid) {
-        // Page fault - need to load page
-        int frame_number = -1;
-
-        // First try to find a free frame
-        for (int i = 0; i < mm->total_frames; i++) {
-            if (mm->frames[i].free) {
-                frame_number = i;
-                break;
-            }
+        // If the CPU is now idle (due to blocking, termination, or preemption), schedule a new process
+        if (!system->running_process) {
+            schedule_next_process(system);
         }
 
-        // If no free frames, select victim
-        if (frame_number == -1) {
-            frame_number = select_victim_frame_LRU(mm);
-
-            // Free the victim frame
-            PCB* victim_proc = NULL;
-            for (int i = 0; i < MAX_PROCESSES; i++) {
-                if (sched.processes[i] && sched.processes[i]->pid == mm->frames[frame_number].pid) {
-                    victim_proc = sched.processes[i];
-                    break;
-                }
-            }
-
-            if (victim_proc) {
-                victim_proc->page_table.entries[mm->frames[frame_number].page_number].valid = false;
-            }
-        }
-
-        // Load the new page
-        mm->frames[frame_number].free = false;
-        mm->frames[frame_number].pid = process->pid;
-        mm->frames[frame_number].page_number = page_number;
-        mm->frames[frame_number].last_used = mm->clock;
-
-        process->page_table.entries[page_number].frame_number = frame_number;
-        process->page_table.entries[page_number].valid = true;
-        mm->free_frames--;
-    }
-
-    // Update access time
-    process->page_access_times[page_number] = mm->clock;
-    mm->frames[process->page_table.entries[page_number].frame_number].last_used = mm->clock;
-    mm->clock++;
-}
-
-int select_victim_frame_LRU(MemoryManager* mm) {
-    int lru_time = INT_MAX;
-    int victim_frame = -1;
-
-    for (int i = 0; i < mm->total_frames; i++) {
-        if (mm->frames[i].last_used < lru_time ||
-            (mm->frames[i].last_used == lru_time && i < victim_frame)) {
-            lru_time = mm->frames[i].last_used;
-            victim_frame = i;
-        }
-    }
-
-    return victim_frame;
-}
-
-void update_process_states(Scheduler* sched, MemoryManager* mm, int time) {
-    // Update process states
-    for (int i = 0; i < sched->process_count; i++) {
-        PCB* proc = sched->processes[i];
-
-        if (proc->state == NEW) {
-            proc->state = READY;
-        }
-        else if (proc->state == EXIT || proc->state == SIGSEGV ||
-                 proc->state == SIGILL || proc->state == SIGEOF) {
-            if (proc->time_left > 0) {
-                proc->time_left--;
-            } else {
-                // Free frames used by this process
-                for (int j = 0; j < mm->total_frames; j++) {
-                    if (mm->frames[j].pid == proc->pid) {
-                        mm->frames[j].free = true;
-                        mm->frames[j].pid = -1;
-                        mm->frames[j].page_number = -1;
-                        mm->free_frames++;
-                    }
-                }
-                // Remove process from scheduler
-                free_process(proc);
-                sched->processes[i] = NULL;
-            }
-        }
-        else if (proc->state == BLOCKED) {
-            // Simplified: unblock after 1 time unit
-            proc->state = READY;
-        }
-    }
-
-    // Compact process array
-    int new_count = 0;
-    for (int i = 0; i < sched->process_count; i++) {
-        if (sched->processes[i] != NULL) {
-            sched->processes[new_count++] = sched->processes[i];
-        }
-    }
-    sched->process_count = new_count;
-}
-
-void schedule_next_process(Scheduler* sched) {
-    // Simplified round-robin scheduling
-    if (sched->current_process != NULL && sched->current_process->state == RUN) {
-        sched->current_process->state = READY;
-    }
-
-    // Find next READY process
-    for (int i = 0; i < sched->process_count; i++) {
-        if (sched->processes[i]->state == READY) {
-            sched->current_process = sched->processes[i];
-            sched->current_process->state = RUN;
-            break;
+        // Check for simulation termination
+        bool system_is_empty = !system->running_process && isEmpty(system->new_queue) &&
+                               isEmpty(system->ready_queue) && isEmpty(system->blocked_queue) &&
+                               isEmpty(system->exit_queue);
+        if (system_is_empty) {
+            bool any_left = false;
+            for(int i=0; i<MAX_PROCESSES; i++) if(system->processes[i]) any_left = true;
+            if(!any_left) break;
         }
     }
 }
 
-void print_state(int time, Scheduler* sched, MemoryManager* mm) {
-    printf("%-4d", time);
+// =================================================================
+//                 STATE UPDATE & SCHEDULING
+// =================================================================
 
-    // Print process states
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (i < sched->process_count) {
-            PCB* proc = sched->processes[i];
-            char state[20];
-
-            switch (proc->state) {
-                case NEW: strcpy(state, "NEW"); break;
-                case READY: strcpy(state, "READY"); break;
-                case RUN: strcpy(state, "RUN"); break;
-                case BLOCKED: strcpy(state, "BLOCKED"); break;
-                case EXIT: strcpy(state, "EXIT"); break;
-                case SIGSEGV: strcpy(state, "SIGSEGV"); break;
-                case SIGILL: strcpy(state, "SIGILL"); break;
-                case SIGEOF: strcpy(state, "SIGEOF"); break;
-            }
-
-            // Print process state
-            printf("%-10s", state);
-
-            // Print frames if process is RUN or BLOCKED
-            if (proc->state == RUN || proc->state == BLOCKED) {
-                printf("[");
-                bool first = true;
-
-                // Collect frames for this process
-                int frames[MAX_FRAMES];
-                int frame_count = 0;
-
-                for (int j = 0; j < mm->total_frames; j++) {
-                    if (mm->frames[j].pid == proc->pid) {
-                        frames[frame_count++] = mm->frames[j].frame_id;
-                    }
-                }
-
-                // Sort frames for consistent output
-                for (int j = 0; j < frame_count; j++) {
-                    for (int k = j+1; k < frame_count; k++) {
-                        if (frames[j] > frames[k]) {
-                            int temp = frames[j];
-                            frames[j] = frames[k];
-                            frames[k] = temp;
-                        }
-                    }
-                }
-
-                // Print sorted frames
-                for (int j = 0; j < frame_count; j++) {
-                    if (!first) printf(",");
-                    printf("F%d", frames[j]);
-                    first = false;
-                }
-
-                printf("]");
-            } else {
-                printf("          "); // Padding for alignment
-            }
+void update_new_processes(SimulationSystem* system) {
+    size_t initial_size = queueSize(system->new_queue);
+    for (size_t i = 0; i < initial_size; i++) {
+        PCB* proc = (PCB*)dequeue(system->new_queue);
+        proc->time_in_state++;
+        if (proc->time_in_state >= 2) {
+            proc->state = STATE_READY;
+            proc->time_in_state = 0;
+            enqueue(system->ready_queue, proc);
         } else {
-            printf("                    "); // Padding for empty slots
+            enqueue(system->new_queue, proc);
         }
     }
-
-    printf("\n");
 }
 
-bool should_continue(Scheduler* sched) {
-    if (sched->process_count == 0) return false;
+void update_blocked_processes(SimulationSystem* system) {
+    size_t initial_size = queueSize(system->blocked_queue);
+    for (size_t i = 0; i < initial_size; i++) {
+        PCB* proc = (PCB*)dequeue(system->blocked_queue);
+        proc->time_in_state++;
+        if (proc->time_in_state >= abs(proc->instructions[proc->pc])) {
+            proc->state = STATE_READY;
+            proc->time_in_state = 0;
+            proc->pc++;
+            enqueue(system->ready_queue, proc);
+        } else {
+            enqueue(system->blocked_queue, proc);
+        }
+    }
+}
 
-    for (int i = 0; i < sched->process_count; i++) {
-        if (sched->processes[i]->state != EXIT &&
-            sched->processes[i]->state != SIGSEGV &&
-            sched->processes[i]->state != SIGILL &&
-            sched->processes[i]->state != SIGEOF) {
+void update_exit_processes(SimulationSystem* system) {
+    size_t initial_size = queueSize(system->exit_queue);
+    for (size_t i = 0; i < initial_size; i++) {
+        PCB* proc = (PCB*)dequeue(system->exit_queue);
+        proc->time_in_state++;
+        if (proc->time_in_state >= 3) {
+            free_process_memory(system, proc->pid);
+            system->processes[proc->pid - 1] = NULL;
+            free(proc->instructions);
+            free(proc);
+        } else {
+            enqueue(system->exit_queue, proc);
+        }
+    }
+}
+
+static void schedule_next_process(SimulationSystem* system) {
+    if (system->running_process) return;
+    if (!isEmpty(system->ready_queue)) {
+        PCB* proc_to_run = (PCB*)dequeue(system->ready_queue);
+        proc_to_run->state = STATE_RUNNING;
+        proc_to_run->time_in_state = 0;
+        proc_to_run->remaining_quantum = QUANTUM;
+        system->running_process = proc_to_run;
+    }
+}
+
+// =================================================================
+//                       INSTRUCTION EXECUTION
+// =================================================================
+
+void execute_running_process(SimulationSystem* system) {
+    PCB* proc = system->running_process;
+    proc->time_in_state++;
+
+    // Check for errors *before* fetching instruction
+    if (proc->pc < 0) set_process_error(proc, "SIGILL");
+    else if (proc->pc >= proc->instruction_count) set_process_error(proc, proc->has_halt ? "SIGILL" : "SIGEOF");
+    
+    if (proc->has_error) {
+        proc->state = STATE_EXIT;
+        proc->time_in_state = 0;
+        enqueue(system->exit_queue, proc);
+        system->running_process = NULL;
+        return;
+    }
+
+    int instruction = proc->instructions[proc->pc];
+    bool pc_managed_by_instruction = false;
+
+    // --- Execute Instruction ---
+    if (instruction == 0) { // HALT
+        proc->state = STATE_EXIT;
+    } else if (instruction < 0) { // I/O
+        proc->state = STATE_BLOCKED;
+    } else if (instruction >= 1 && instruction <= 100) { // JUMPF
+        proc->pc += instruction;
+        pc_managed_by_instruction = true;
+    } else if (instruction >= 101 && instruction <= 199) { // JUMPB
+        proc->pc -= (instruction % 100);
+        pc_managed_by_instruction = true;
+    } else if (instruction >= 201 && instruction <= 299) { // EXEC
+        create_new_process(system, instruction % 100);
+    } else if (instruction >= 1000 && instruction <= 15999) { // LOAD/STORE
+        if (!handle_memory_access(system, proc, instruction - 1000)) {
+            set_process_error(proc, "SIGSEGV");
+            proc->state = STATE_EXIT;
+        }
+    }
+    
+    // Increment PC if it wasn't a jump
+    if (!pc_managed_by_instruction && proc->state != STATE_BLOCKED) {
+        proc->pc++;
+    }
+
+    // --- Handle post-execution state changes ---
+    if (proc->state == STATE_EXIT) {
+        proc->time_in_state = 0;
+        enqueue(system->exit_queue, proc);
+        system->running_process = NULL;
+    } else if (proc->state == STATE_BLOCKED) {
+        proc->time_in_state = 0;
+        enqueue(system->blocked_queue, proc);
+        system->running_process = NULL;
+    } else if (proc->time_in_state >= proc->remaining_quantum) { // Quantum expired
+        proc->state = STATE_READY;
+        proc->time_in_state = 0;
+        enqueue(system->ready_queue, proc);
+        system->running_process = NULL;
+    }
+}
+
+// =================================================================
+//                      MEMORY MANAGEMENT
+// =================================================================
+
+bool handle_memory_access(SimulationSystem* system, PCB* proc, int address) {
+    if (address < 0 || address >= proc->memory_size) return false;
+    int page_num = address / PAGE_SIZE;
+
+    for (int i = 0; i < NUM_FRAMES; i++) {
+        if (system->physical_memory[i].process_id == proc->pid && system->physical_memory[i].page_number == page_num) {
+            system->physical_memory[i].last_access_time = system->current_time;
             return true;
         }
     }
+    int frame_idx = find_free_frame(system);
+    if (frame_idx == -1) frame_idx = find_victim_lru(system);
 
-    return false;
+    system->physical_memory[frame_idx].process_id = proc->pid;
+    system->physical_memory[frame_idx].page_number = page_num;
+    system->physical_memory[frame_idx].load_time = system->current_time;
+    system->physical_memory[frame_idx].last_access_time = system->current_time;
+    return true;
 }
 
-void simulate(Scheduler* sched, MemoryManager* mm) {
-    int time = 1;
-    bool running = true;
+static int find_free_frame(SimulationSystem* system) {
+    for (int i = 0; i < NUM_FRAMES; i++) if (system->physical_memory[i].process_id == -1) return i;
+    return -1;
+}
 
-    // Print header
-    printf("time inst  proc1                     proc2                     proc3                     proc4                     proc5                     proc6                     proc7                     proc8                     proc9                     proc10                    proc11                    proc12                    proc13                    proc14                    proc15                    proc16                    proc17                    proc18                    proc19                    proc20                  \n");
+static int find_victim_lru(SimulationSystem* system) {
+    int victim_frame = -1;
+    int min_access_time = INT_MAX;
+    for (int i = 0; i < NUM_FRAMES; i++) {
+        if (system->physical_memory[i].last_access_time < min_access_time) {
+            min_access_time = system->physical_memory[i].last_access_time;
+            victim_frame = i;
+        } else if (system->physical_memory[i].last_access_time == min_access_time) {
+            if (victim_frame == -1 || i < victim_frame) victim_frame = i;
+        }
+    }
+    return victim_frame;
+}
 
-    while (running && time <= 100) {
-        // Update process states
-        update_process_states(sched, mm, time);
+void free_process_memory(SimulationSystem* system, int pid) {
+    for (int i = 0; i < NUM_FRAMES; i++) if (system->physical_memory[i].process_id == pid) system->physical_memory[i].process_id = -1;
+}
 
-        // Schedule next process
-        schedule_next_process(sched);
+// =================================================================
+//                      PROCESS & ERROR HELPERS
+// =================================================================
 
-        // Execute current process if in RUN state
-        if (sched->current_process && sched->current_process->state == RUN) {
-            execute_instruction(sched->current_process, mm, sched);
+static PCB* create_new_process(SimulationSystem* system, int prog_id) {
+    int prog_idx = prog_id - 1;
+    if (system->next_pid > MAX_PROCESSES || prog_idx < 0 || prog_idx >= MAX_PROGRAMS) return NULL;
+    
+    PCB* proc = (PCB*)calloc(1, sizeof(PCB));
+    proc->pid = system->next_pid++;
+    proc->program_id = prog_id;
+    proc->state = STATE_NEW;
+    proc->pc = 0;
+    proc->memory_size = system->program_mem_sizes[prog_idx];
+    proc->instruction_count = system->program_lengths[prog_idx];
+    proc->has_halt = system->program_has_halt[prog_idx];
+    proc->instructions = (int*)malloc(proc->instruction_count * sizeof(int));
+    memcpy(proc->instructions, system->programs[prog_idx], proc->instruction_count * sizeof(int));
+    system->processes[proc->pid - 1] = proc;
+    enqueue(system->new_queue, proc);
+    return proc;
+}
+
+static void set_process_error(PCB* proc, const char* error_code) {
+    if (!proc->has_error) {
+        proc->has_error = true;
+        strncpy(proc->error_code, error_code, sizeof(proc->error_code) - 1);
+    }
+}
+
+// =================================================================
+//                            OUTPUT
+// =================================================================
+
+void print_header() {
+    printf("%-5s", "time");
+    for (int i = 1; i <= MAX_PROCESSES; i++) {
+        char header[20];
+        sprintf(header, "proc%d", i);
+        printf("%-26s", header);
+    }
+    printf("\n");
+}
+
+void print_system_state(SimulationSystem* system) {
+    printf("%-5d", system->current_time);
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        PCB* proc = system->processes[i];
+        if (!proc) {
+            printf("%-26s", "");
+            continue;
         }
 
-        // Print current state
-        print_state(time, sched, mm);
+        char state_str[10] = "";
+        char frame_str[100] = "[]";
 
-        // Check if simulation should end
-        running = should_continue(sched);
-
-        time++;
+        // Logic to determine the string for the state
+        if (proc->has_error && proc->state != STATE_READY && proc->state != STATE_NEW) {
+            if (proc->state == STATE_EXIT && proc->time_in_state > 0) {
+                 strcpy(state_str, "EXIT");
+            } else {
+                 strcpy(state_str, proc->error_code);
+            }
+        } else {
+            switch (proc->state) {
+                case STATE_NEW:     strcpy(state_str, "NEW"); break;
+                case STATE_READY:   strcpy(state_str, "READY"); break;
+                case STATE_RUNNING: strcpy(state_str, "RUN"); break;
+                case STATE_BLOCKED: strcpy(state_str, "BLOCKED"); break;
+                case STATE_EXIT:    strcpy(state_str, "EXIT"); break;
+            }
+        }
+        
+        // Build frame string
+        int proc_frames[NUM_FRAMES], proc_pages[NUM_FRAMES], frame_count = 0;
+        for (int f = 0; f < NUM_FRAMES; f++) {
+            if (system->physical_memory[f].process_id == proc->pid) {
+                proc_frames[frame_count] = system->physical_memory[f].frame_id;
+                proc_pages[frame_count] = system->physical_memory[f].page_number;
+                frame_count++;
+            }
+        }
+        
+        if (frame_count > 0) {
+            for(int k=0; k<frame_count-1; k++) {
+                for(int m=0; m<frame_count-k-1; m++) {
+                    if(proc_pages[m] > proc_pages[m+1]) {
+                        int temp_p = proc_pages[m]; proc_pages[m] = proc_pages[m+1]; proc_pages[m+1] = temp_p;
+                        int temp_f = proc_frames[m]; proc_frames[m] = proc_frames[m+1]; proc_frames[m+1] = temp_f;
+                    }
+                }
+            }
+            char temp_frame_str[100] = "";
+            char temp_buf[10];
+            for (int k = 0; k < frame_count; k++) {
+                sprintf(temp_buf, "F%d%s", proc_frames[k], (k < frame_count - 1) ? "," : "");
+                strcat(temp_frame_str, temp_buf);
+            }
+            sprintf(frame_str, "[%s]", temp_frame_str);
+        }
+        
+        char final_output[150];
+        sprintf(final_output, "%s %s", state_str, frame_str);
+        printf("%-26s", final_output);
     }
+    printf("\n");
 }

@@ -1,88 +1,112 @@
-#ifndef P2_SIMULATOR_H
-#define P2_SIMULATOR_H
+#ifndef SIMULATOR_H
+#define SIMULATOR_H
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "queue.h"
 #include <stdbool.h>
-#include <limits.h>
 
+// --- System Constants ---
+#define MAX_TIME 100
 #define MAX_PROCESSES 20
-#define MAX_FRAMES 7  // 21KB total / 3KB per frame
-#define PAGE_SIZE 3072  // 3KB
-#define MAX_PROGRAM_SIZE 100
-#define MAX_MEMORY 21504  // 21KB in bytes
+#define MAX_PROGRAMS 20
+#define MAX_PROG_LEN 20
+#define QUANTUM 3
+#define PAGE_SIZE 3000
+#define MEMORY_KB 21
+#define NUM_FRAMES (MEMORY_KB * 1000 / PAGE_SIZE) // Should be 7
 
-// Process states
+// --- Process States ---
 typedef enum {
-    NEW, READY, RUN, BLOCKED, EXIT, SIGSEGV, SIGILL, SIGEOF
+    STATE_NEW,
+    STATE_READY,
+    STATE_RUNNING,
+    STATE_BLOCKED,
+    STATE_EXIT
 } ProcessState;
 
-// Frame structure
+// --- Memory Frame Structure ---
 typedef struct {
     int frame_id;
-    bool free;
-    int pid;
+    int process_id;
     int page_number;
-    int last_used;
+    int load_time;
+    int last_access_time;
 } Frame;
 
-// Page table entry
-typedef struct {
-    int frame_number;
-    bool valid;
-    bool dirty;
-} PageTableEntry;
-
-// Page table
-typedef struct {
-    PageTableEntry* entries;
-    int page_count;
-} PageTable;
-
-// Process Control Block
+// --- Process Control Block (PCB) ---
 typedef struct {
     int pid;
+    int program_id;
     ProcessState state;
-    int pc;
-    int program_size;
-    int* program;
-    int address_space;
-    int time_left;
+    int time_in_state;
+    int pc; // Program Counter
 
-    PageTable page_table;
-    int* page_access_times;
-    int last_used_time;
+    // Scheduler related
+    int remaining_quantum;
+    int blocked_until_time;
+
+    // Memory related
+    int memory_size;
+
+    // Program instructions
+    int* instructions;
+    int instruction_count;
+    bool has_halt;
+
+    // Error handling
+    bool has_error;
+    char error_code[10];
+
 } PCB;
 
-// Memory Manager
+// --- Main System Structure ---
 typedef struct {
-    Frame frames[MAX_FRAMES];
-    int free_frames;
-    int total_frames;
-    int clock;
-} MemoryManager;
-
-// Scheduler
-typedef struct {
+    // Core components
+    int current_time;
+    int next_pid;
     PCB* processes[MAX_PROCESSES];
-    int process_count;
-    PCB* current_process;
-} Scheduler;
+    PCB* running_process;
 
-// Function prototypes
-void initialize_memory(MemoryManager* mm);
-void initialize_scheduler(Scheduler* sched);
-PCB* create_process(int pid, int address_space, int* program, int program_size);
-void free_process(PCB* process);
-void execute_instruction(PCB* process, MemoryManager* mm, Scheduler* sched);
-void handle_memory_access(PCB* process, MemoryManager* mm, int address);
-int select_victim_frame_LRU(MemoryManager* mm);
-void update_process_states(Scheduler* sched, MemoryManager* mm, int time);
-void schedule_next_process(Scheduler* sched);
-void print_state(int time, Scheduler* sched, MemoryManager* mm);
-bool should_continue(Scheduler* sched);
-void simulate(Scheduler* sched, MemoryManager* mm);
+    // State queues
+    Queue* new_queue;
+    Queue* ready_queue;
+    Queue* blocked_queue;
+    Queue* exit_queue;
 
+    // Memory components
+    Frame physical_memory[NUM_FRAMES];
 
-#endif //P2_SIMULATOR_H
+    // Program data loaded from input
+    int programs[MAX_PROGRAMS][MAX_PROG_LEN];
+    int program_mem_sizes[MAX_PROGRAMS];
+    int program_lengths[MAX_PROGRAMS];
+    bool program_has_halt[MAX_PROGRAMS];
+
+} SimulationSystem;
+
+// --- Function Prototypes ---
+
+// Initialization and Cleanup
+void initialize_system(SimulationSystem* system, int (*input_programs)[20], int num_rows);
+void cleanup_system(SimulationSystem* system);
+
+// Main Simulation Loop
+void run_simulation(SimulationSystem* system);
+
+// State Update Functions
+void update_new_processes(SimulationSystem* system);
+void update_blocked_processes(SimulationSystem* system);
+void update_exit_processes(SimulationSystem* system);
+void update_scheduler(SimulationSystem* system);
+
+// Instruction Execution
+void execute_running_process(SimulationSystem* system);
+
+// Memory Management
+bool handle_memory_access(SimulationSystem* system, PCB* proc, int address);
+void free_process_memory(SimulationSystem* system, int pid);
+
+// Output
+void print_header();
+void print_system_state(SimulationSystem* system);
+
+#endif // SIMULATOR_H
