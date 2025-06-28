@@ -114,7 +114,7 @@ void print_header(int num_procs) {
     printf("%-4s %-4s", "time", "inst");
     
     for (int i = 1; i <= num_procs; i++) {
-        char header_text[10];
+        char header_text[16];
         // Create the "proc1", "proc2", etc. text
         sprintf(header_text, "proc%d", i);
         // Print it with padding

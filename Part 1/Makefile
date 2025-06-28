@@ -1,23 +1,22 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O2
+CFLAGS = -Wall -Wextra -g
 
-OBJS = main.o p1_simulator.o inputs_part1.o
+SRCS = main.c p1_simulator.c inputs_part1.c
+OBJS = $(SRCS:.c=.o)
+TARGET = sim.exe
 
-all: p1_sim.exe
+all: $(TARGET)
 
-p1_sim.exe: $(OBJS)
-    $(CC) $(CFLAGS) -o p1_sim.exe $(OBJS)
+$(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $^
 
-main.o: main.c p1_simulator.h inputs_part1.h
-    $(CC) $(CFLAGS) -c main.c
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
-p1_simulator.o: p1_simulator.c p1_simulator.h inputs_part1.h
-    $(CC) $(CFLAGS) -c p1_simulator.c
-
-inputs_part1.o: inputs_part1.c inputs_part1.h
-    $(CC) $(CFLAGS) -c inputs_part1.c
+run: $(TARGET)
+	./$(TARGET)
 
 clean:
-    rm -f *.o p1_sim.exe fifo*.out lru*.out
+	rm -f *.o $(TARGET)
 
-.PHONY: all clean
+.PHONY: all clean run
