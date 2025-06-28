@@ -1,113 +1,89 @@
-#ifndef SIMULATOR_H
-#define SIMULATOR_H
+#ifndef SIMULATION_H
+#define SIMULATION_H
 
+#include <limits.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h> 
+#include <stdbool.h> 
 #include "queue.h"
-#include <stdbool.h>
 
-// --- System Constants ---
-#define MAX_TIME 100
-#define MAX_PROCESSES 20
-#define MAX_PROGRAMS 20
-#define MAX_INSTRUCTIONS 11
-#define QUANTUM 3
+// --- Configuration from Part 2 ---
 #define PAGE_SIZE 3000
-#define MEMORY_KB 21
-#define NUM_FRAMES (MEMORY_KB * 1000 / PAGE_SIZE) // Should be 7
-#define INACTIVE_PROCESS -1
-#define DEFAULT_FRAME -1
+#define NUM_FRAMES 7  // 21KB total memory / 3KB per frame
+#define MAX_PROCESSES 20
+#define MAX_PROGRAM_INSTRUCTIONS 100 // A reasonable limit for instructions per program
 
-// --- Process States ---
-typedef enum {
-    STATE_NEW,
-    STATE_READY,
-    STATE_RUNNING,
-    STATE_BLOCKED,
-    STATE_EXIT
-} ProcessState;
-
-// --- Memory Frame Structure ---
+// --- Memory Management Structures ---
 typedef struct {
     int frame_id;
     int process_id;
     int page_number;
+    int load_time;
     int last_access_time;
 } Frame;
 
-// --- Process Control Block (PCB) ---
+// --- Process and System Structures ---
+typedef enum {
+    NEW, READY, RUNNING, BLOCKED, EXIT
+} ProcessState;
+
 typedef struct {
     int pid;
     int program_id;
     ProcessState state;
-    int time_in_state;
+    const char* error_message; // For SIGSEGV, SIGILL, etc.
+
     int pc; // Program Counter
-
-    // Scheduler related
+    int time_in_state;
     int remaining_quantum;
-    int blocked_until_time;
+    int blocked_until;
 
-    // Memory related
+    // Memory and instruction info
     int memory_size;
-
-    // Program instructions
     int* instructions;
     int instruction_count;
-    bool has_halt;
-
-    // Error handling
-    bool has_error;
-    char error_code[10];
 
 } PCB;
 
-// --- Main System Structure ---
 typedef struct {
-    // Core components
+    // Queues
+    Queue *new_queue;
+    Queue *ready_queue;
+    Queue *blocked_queue;
+    Queue *exit_queue;
+
+    // CPU and System State
+    PCB *running_process;
     int current_time;
     int next_pid;
-    PCB* processes[MAX_PROCESSES];
-    PCB* running_process;
 
-    // State queues
-    Queue* new_queue;
-    Queue* ready_queue;
-    Queue* blocked_queue;
-    Queue* exit_queue;
+    // Process and Program Storage
+    PCB *processes[MAX_PROCESSES];
+    int programs[5][MAX_PROGRAM_INSTRUCTIONS];
+    int program_lengths[5];
+    int program_mem_sizes[5];
+    bool pre_new_printed[MAX_PROCESSES];
+    bool will_be_created;
 
-    // Memory components
+
+    // Physical Memory
     Frame physical_memory[NUM_FRAMES];
-
-    // Program data loaded from input
-    int programs[MAX_PROGRAMS][MAX_INSTRUCTIONS];
-    int program_mem_sizes[MAX_PROGRAMS];
-    int program_lengths[MAX_PROGRAMS];
-    bool program_has_halt[MAX_PROGRAMS];
 
 } SimulationSystem;
 
-// --- Function Prototypes ---
+// Input Structure (assuming it's defined elsewhere or passed directly)
+typedef struct {
+    int (*programs)[20];
+    int rows;
+} SimulationInput;
 
-// Initialization and Cleanup
-void initialize_system(SimulationSystem* system, int (*input_programs)[20], int num_rows);
-void cleanup_system(SimulationSystem* system);
 
-// Main Simulation Loop
-void run_simulation(SimulationSystem* system);
+// Function Prototypes
+void initialize_system_with_input(SimulationSystem *system, SimulationInput input);
+void run_simulation(SimulationSystem *system);
+PCB *create_new_process(SimulationSystem *system, int prog_id);
+void print_current_state(SimulationSystem *system);
+// ... other internal functions ...
 
-// State Update Functions
-void update_new_processes(SimulationSystem* system);
-void update_blocked_processes(SimulationSystem* system);
-void update_exit_processes(SimulationSystem* system);
-void update_scheduler(SimulationSystem* system);
-
-// Instruction Execution
-void execute_running_process(SimulationSystem* system);
-
-// Memory Management
-bool handle_memory_access(SimulationSystem* system, PCB* proc, int address);
-void free_process_memory(SimulationSystem* system, int pid);
-
-// Output
-void print_header();
-void print_system_state(SimulationSystem* system);
-
-#endif // SIMULATOR_H
+#endif // SIMULATION_H

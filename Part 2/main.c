@@ -1,65 +1,58 @@
-#include <stdio.h>
-#include <stdlib.h>
 #include "p2_simulator.h"
-#include "inputs_part2.h"
+#include "inputs_part2.h" // Assuming new inputs are here
+
+// Define the number of inputs
+#define NUM_INPUTS 12
 
 int main() {
-    // Define a struct locally to hold the test case data and its properties.
-    // This avoids modifying any header files.
-    typedef struct {
-        int (*program_data)[20];
-        int num_rows;
-        const char* name;
-    } TestCase;
-
-    // Manually define all 12 test cases. This removes the need for NUM_TEST_CASES.
-    TestCase all_tests[] = {
-        {input00,  8, "00"},
-        {input01,  6, "01"},
-        {input02,  5, "02"},
-        {input03,  6, "03"},
-        {input04,  6, "04"},
-        {input05,  6, "05"},
-        {input06,  5, "06"},
-        {input07, 12, "07"},
-        {input08, 12, "08"},
-        {input09, 12, "09"},
-        {input10, 12, "10"},
-        {input11, 12, "11"}
+    SimulationInput inputs[NUM_INPUTS] = {
+        {input00, 8}, {input01, 6}, {input02, 5}, {input03, 6}, {input04, 6},
+        {input05, 6}, {input06, 5}, {input07, 12}, {input08, 12}, {input09, 12},
+        {input10, 12}, {input11, 12}
     };
-    int num_tests = sizeof(all_tests) / sizeof(all_tests[0]);
 
-    printf("Starting OS Simulation (Assignment 2, Part 2)...\n");
-
-    for (int i = 0; i < num_tests; i++) {
+    for (int i = 0; i < NUM_INPUTS; i++) {
         SimulationSystem system;
-        char filename[30];
-        sprintf(filename, "output2T%s.out", all_tests[i].name);
+        char filename[20];
+        snprintf(filename, sizeof(filename), "output2T%02d.out", i);
 
-        // Redirect stdout to the output file
         FILE* output_file = freopen(filename, "w", stdout);
         if (output_file == NULL) {
-            perror("Error: Could not open output file");
+            perror("Error opening output file");
             continue;
         }
 
-        // Run the simulation for the current test case
-        initialize_system(&system, all_tests[i].program_data, all_tests[i].num_rows);
+        initialize_system_with_input(&system, inputs[i]);
         run_simulation(&system);
-        cleanup_system(&system);
 
-        // Close the file
-        fclose(output_file);
+        // Cleanup any remaining processes (for safety, though run_simulation should handle it)
+        for (int j = 0; j < MAX_PROCESSES; j++) {
+            if (system.processes[j] != NULL) {
+                if (system.processes[j]->instructions) {
+                    free(system.processes[j]->instructions);
+                }
+                free(system.processes[j]);
+                system.processes[j] = NULL;
+            }
+        }
+
+        // Cleanup queues
+        if (system.new_queue) deleteQueue(system.new_queue);
+        if (system.ready_queue) deleteQueue(system.ready_queue);
+        if (system.blocked_queue) deleteQueue(system.blocked_queue);
+        if (system.exit_queue) deleteQueue(system.exit_queue);
+
+        fclose(stdout);
     }
     
-    // Restore stdout for the final message
+    // Restore console output
     #ifdef _WIN32
         freopen("CONOUT$", "w", stdout);
     #else
         freopen("/dev/tty", "w", stdout);
     #endif
+    printf("Generated output files for %d test cases.\n", NUM_INPUTS);
 
-    printf("Simulation complete. All %d test case files generated.\n", num_tests);
 
     return 0;
 }
