@@ -16,48 +16,70 @@ void execute_running_process(SimulationSystem* system);
 //                    INITIALIZATION & CLEANUP
 // =================================================================
 
+// Initializes the system
 void initialize_system(SimulationSystem* system, int (*input_programs)[20], int num_rows) {
     memset(system, 0, sizeof(SimulationSystem));
     system->current_time = 0;
     system->next_pid = 1;
 
+    // Initializes all queues
     system->new_queue = createQueue();
     system->ready_queue = createQueue();
     system->blocked_queue = createQueue();
     system->exit_queue = createQueue();
 
+    // Initializes all frames 
     for (int i = 0; i < NUM_FRAMES; i++) {
         system->physical_memory[i].frame_id = i;
-        system->physical_memory[i].process_id = -1;
+        system->physical_memory[i].process_id = INACTIVE_PROCESS;
+        system->physical_memory[i].last_access_time = system->current_time;
+
     }
 
+    // Initializes all programs
     for (int i = 0; i < MAX_PROGRAMS; i++) {
         system->program_mem_sizes[i] = input_programs[0][i];
         system->program_lengths[i] = 0;
         system->program_has_halt[i] = false;
 
-        for (int j = 0; j < num_rows - 1 && j < MAX_PROG_LEN; j++) {
-            int instruction = input_programs[j + 1][i];
-            system->programs[i][j] = instruction;
+        // Cycles all instructions
+        for (int j = 1; j < num_rows; j++) {
+            // Stores the current instruction
+            int instruction = input_programs[j][i];
+            system->programs[i][j - 1] = instruction;
+
+            // Checks if the current instruction is an halt, if so sets the program length
             if (instruction == 0 && !system->program_has_halt[i]) {
-                system->program_lengths[i] = j + 1;
+                system->program_lengths[i] = j - 1;
                 system->program_has_halt[i] = true;
+
             }
         }
+
+        // If there is not any halt instruction, sets the maximum program length
         if (!system->program_has_halt[i]) {
             system->program_lengths[i] = num_rows - 1;
+
         }
     }
+
+    // Creates the initial process
     create_new_process(system, 1);
+
 }
 
+
+// Cleans up all system memory
 void cleanup_system(SimulationSystem* system) {
+    // Frees all processes memory
     for (int i = 0; i < MAX_PROCESSES; i++) {
         if (system->processes[i]) {
             free(system->processes[i]->instructions);
             free(system->processes[i]);
         }
     }
+
+    // Deletes all queues
     deleteQueue(system->new_queue);
     deleteQueue(system->ready_queue);
     deleteQueue(system->blocked_queue);
@@ -68,36 +90,42 @@ void cleanup_system(SimulationSystem* system) {
 //                      MAIN SIMULATION LOOP (Based on Assignment 1)
 // =================================================================
 
+// Responsible for running all the system simulation
 void run_simulation(SimulationSystem* system) {
     print_header();
 
     for (system->current_time = 1; system->current_time <= MAX_TIME; system->current_time++) {
-        // Print the state at the beginning of the tick
-        print_system_state(system);
-
-        // Update processes in timed states first, potentially adding them to the READY queue
-        update_blocked_processes(system);
+        
+        // --- FIRST: Perform all calculations for the current time tick ---
         update_new_processes(system);
+        update_blocked_processes(system);
         update_exit_processes(system);
 
-        // If a process is running, execute its instruction for this tick
         if (system->running_process) {
             execute_running_process(system);
         }
-
-        // If the CPU is now idle (due to blocking, termination, or preemption), schedule a new process
+        
         if (!system->running_process) {
             schedule_next_process(system);
         }
+        
 
-        // Check for simulation termination
+        // --- LAST: Print the final state AFTER all work is done ---
+        print_system_state(system);
+
+        // Check for simulation termination after printing
         bool system_is_empty = !system->running_process && isEmpty(system->new_queue) &&
                                isEmpty(system->ready_queue) && isEmpty(system->blocked_queue) &&
                                isEmpty(system->exit_queue);
+                               
         if (system_is_empty) {
             bool any_left = false;
-            for(int i=0; i<MAX_PROCESSES; i++) if(system->processes[i]) any_left = true;
-            if(!any_left) break;
+
+            for (int i = 0; i < MAX_PROCESSES; i++) 
+                if (system->processes[i]) 
+                    any_left = true;
+
+            if (!any_left) break;
         }
     }
 }
@@ -106,61 +134,81 @@ void run_simulation(SimulationSystem* system) {
 //                 STATE UPDATE & SCHEDULING
 // =================================================================
 
+// 
 void update_new_processes(SimulationSystem* system) {
     size_t initial_size = queueSize(system->new_queue);
+
     for (size_t i = 0; i < initial_size; i++) {
         PCB* proc = (PCB*)dequeue(system->new_queue);
         proc->time_in_state++;
+
+        // Change back to >= 2 to ensure 2 time units in NEW state
         if (proc->time_in_state >= 2) {
             proc->state = STATE_READY;
             proc->time_in_state = 0;
+
             enqueue(system->ready_queue, proc);
+
         } else {
             enqueue(system->new_queue, proc);
+
         }
     }
 }
 
 void update_blocked_processes(SimulationSystem* system) {
     size_t initial_size = queueSize(system->blocked_queue);
+
     for (size_t i = 0; i < initial_size; i++) {
         PCB* proc = (PCB*)dequeue(system->blocked_queue);
         proc->time_in_state++;
+
         if (proc->time_in_state >= abs(proc->instructions[proc->pc])) {
             proc->state = STATE_READY;
             proc->time_in_state = 0;
             proc->pc++;
+
             enqueue(system->ready_queue, proc);
+
         } else {
             enqueue(system->blocked_queue, proc);
+            
         }
     }
 }
 
 void update_exit_processes(SimulationSystem* system) {
     size_t initial_size = queueSize(system->exit_queue);
+
     for (size_t i = 0; i < initial_size; i++) {
         PCB* proc = (PCB*)dequeue(system->exit_queue);
         proc->time_in_state++;
+
         if (proc->time_in_state >= 3) {
             free_process_memory(system, proc->pid);
             system->processes[proc->pid - 1] = NULL;
+
             free(proc->instructions);
             free(proc);
+
         } else {
             enqueue(system->exit_queue, proc);
+
         }
     }
 }
 
 static void schedule_next_process(SimulationSystem* system) {
     if (system->running_process) return;
+
     if (!isEmpty(system->ready_queue)) {
         PCB* proc_to_run = (PCB*)dequeue(system->ready_queue);
         proc_to_run->state = STATE_RUNNING;
         proc_to_run->time_in_state = 0;
         proc_to_run->remaining_quantum = QUANTUM;
+        
         system->running_process = proc_to_run;
+
     }
 }
 
@@ -170,6 +218,7 @@ static void schedule_next_process(SimulationSystem* system) {
 
 void execute_running_process(SimulationSystem* system) {
     PCB* proc = system->running_process;
+
     proc->time_in_state++;
 
     // Check for errors *before* fetching instruction
@@ -190,20 +239,26 @@ void execute_running_process(SimulationSystem* system) {
     // --- Execute Instruction ---
     if (instruction == 0) { // HALT
         proc->state = STATE_EXIT;
+
     } else if (instruction < 0) { // I/O
         proc->state = STATE_BLOCKED;
+
     } else if (instruction >= 1 && instruction <= 100) { // JUMPF
         proc->pc += instruction;
         pc_managed_by_instruction = true;
+
     } else if (instruction >= 101 && instruction <= 199) { // JUMPB
         proc->pc -= (instruction % 100);
         pc_managed_by_instruction = true;
+
     } else if (instruction >= 201 && instruction <= 299) { // EXEC
         create_new_process(system, instruction % 100);
+
     } else if (instruction >= 1000 && instruction <= 15999) { // LOAD/STORE
         if (!handle_memory_access(system, proc, instruction - 1000)) {
             set_process_error(proc, "SIGSEGV");
             proc->state = STATE_EXIT;
+
         }
     }
     
@@ -233,47 +288,89 @@ void execute_running_process(SimulationSystem* system) {
 //                      MEMORY MANAGEMENT
 // =================================================================
 
+// Verify if the address used by the process is valid in memory
 bool handle_memory_access(SimulationSystem* system, PCB* proc, int address) {
+    // Checks if the address is not in a valid range
     if (address < 0 || address >= proc->memory_size) return false;
+
     int page_num = address / PAGE_SIZE;
 
+    // Cycles all pages and finds the correspondent pid and page_num for the given process
     for (int i = 0; i < NUM_FRAMES; i++) {
         if (system->physical_memory[i].process_id == proc->pid && system->physical_memory[i].page_number == page_num) {
             system->physical_memory[i].last_access_time = system->current_time;
+
             return true;
+
         }
     }
-    int frame_idx = find_free_frame(system);
-    if (frame_idx == -1) frame_idx = find_victim_lru(system);
 
+    int frame_idx = find_free_frame(system);
+
+    // Updates the frame variables
     system->physical_memory[frame_idx].process_id = proc->pid;
     system->physical_memory[frame_idx].page_number = page_num;
-    system->physical_memory[frame_idx].load_time = system->current_time;
     system->physical_memory[frame_idx].last_access_time = system->current_time;
+
     return true;
+
 }
 
+
+// Finds a free frame, if none are free gets a victim frame
 static int find_free_frame(SimulationSystem* system) {
-    for (int i = 0; i < NUM_FRAMES; i++) if (system->physical_memory[i].process_id == -1) return i;
-    return -1;
+    // Cycles all frames, searching for a free frame, with no active process
+    for (int i = 0; i < NUM_FRAMES; i++) {
+        if (system->physical_memory[i].process_id == INACTIVE_PROCESS) {
+            return i;
+
+        }
+    }
+
+    // If no frame is found, gets a victim frame
+    return find_victim_lru(system);
+
 }
 
+
+// Finds a substitute frame, with LRU scheduling
 static int find_victim_lru(SimulationSystem* system) {
-    int victim_frame = -1;
+    int victim_frame = DEFAULT_FRAME;
     int min_access_time = INT_MAX;
+
+    // Cycles all frames
     for (int i = 0; i < NUM_FRAMES; i++) {
+        // Gets the frame with the minimum access time
         if (system->physical_memory[i].last_access_time < min_access_time) {
             min_access_time = system->physical_memory[i].last_access_time;
             victim_frame = i;
-        } else if (system->physical_memory[i].last_access_time == min_access_time) {
-            if (victim_frame == -1 || i < victim_frame) victim_frame = i;
+        
+        }
+        
+        // If there are 2 frames with the same time, gets the smallest frame
+        if (system->physical_memory[i].last_access_time == min_access_time) {
+            if (victim_frame == DEFAULT_FRAME || i < victim_frame) {
+                victim_frame = i;
+            
+            }
         }
     }
+
     return victim_frame;
+
 }
 
+
+// Frees a frame with a specific pid
 void free_process_memory(SimulationSystem* system, int pid) {
-    for (int i = 0; i < NUM_FRAMES; i++) if (system->physical_memory[i].process_id == pid) system->physical_memory[i].process_id = -1;
+    // Cycles all frames
+    for (int i = 0; i < NUM_FRAMES; i++) {
+        // Finds the pid in the current frame
+        if (system->physical_memory[i].process_id == pid) {
+            system->physical_memory[i].process_id = INACTIVE_PROCESS;
+
+        }
+    }
 }
 
 // =================================================================
@@ -285,18 +382,28 @@ static PCB* create_new_process(SimulationSystem* system, int prog_id) {
     if (system->next_pid > MAX_PROCESSES || prog_idx < 0 || prog_idx >= MAX_PROGRAMS) return NULL;
     
     PCB* proc = (PCB*)calloc(1, sizeof(PCB));
+
     proc->pid = system->next_pid++;
     proc->program_id = prog_id;
     proc->state = STATE_NEW;
     proc->pc = 0;
+
+    if (proc->pid == 1) {
+        proc->time_in_state = -1;
+    } else {
+        proc->time_in_state = 0;
+    }
+
     proc->memory_size = system->program_mem_sizes[prog_idx];
     proc->instruction_count = system->program_lengths[prog_idx];
     proc->has_halt = system->program_has_halt[prog_idx];
+
     proc->instructions = (int*)malloc(proc->instruction_count * sizeof(int));
     memcpy(proc->instructions, system->programs[prog_idx], proc->instruction_count * sizeof(int));
+    
     system->processes[proc->pid - 1] = proc;
     enqueue(system->new_queue, proc);
-    return proc;
+return proc;
 }
 
 static void set_process_error(PCB* proc, const char* error_code) {

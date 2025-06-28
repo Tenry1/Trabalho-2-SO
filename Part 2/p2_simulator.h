@@ -8,11 +8,13 @@
 #define MAX_TIME 100
 #define MAX_PROCESSES 20
 #define MAX_PROGRAMS 20
-#define MAX_PROG_LEN 20
+#define MAX_INSTRUCTIONS 11
 #define QUANTUM 3
 #define PAGE_SIZE 3000
 #define MEMORY_KB 21
 #define NUM_FRAMES (MEMORY_KB * 1000 / PAGE_SIZE) // Should be 7
+#define INACTIVE_PROCESS -1
+#define DEFAULT_FRAME -1
 
 // --- Process States ---
 typedef enum {
@@ -28,7 +30,6 @@ typedef struct {
     int frame_id;
     int process_id;
     int page_number;
-    int load_time;
     int last_access_time;
 } Frame;
 
@@ -76,7 +77,7 @@ typedef struct {
     Frame physical_memory[NUM_FRAMES];
 
     // Program data loaded from input
-    int programs[MAX_PROGRAMS][MAX_PROG_LEN];
+    int programs[MAX_PROGRAMS][MAX_INSTRUCTIONS];
     int program_mem_sizes[MAX_PROGRAMS];
     int program_lengths[MAX_PROGRAMS];
     bool program_has_halt[MAX_PROGRAMS];
