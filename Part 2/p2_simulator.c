@@ -83,6 +83,102 @@ int handle_memory_access(SimulationSystem* system, PCB* proc, int address) {
     return 1;
 }
 
+int handle_swap_memcopy(SimulationSystem* system, PCB* proc, int instruction) {
+    // Decode instruction to get the two addresses
+    int address1 = (instruction / 100000) - 10000;
+    int address2 = instruction % 100000;
+
+    // Validate both addresses. If either is invalid, it's a SIGSEGV.
+    if (address1 < 0 || address1 >= proc->memory_size ||
+        address2 < 0 || address2 >= proc->memory_size) {
+
+        return 0;
+    }
+
+    // --- If we reach here, the instruction's addresses are valid ---
+
+    // Calculate the page numbers needed for each address
+    int page1_needed = address1 / PAGE_SIZE;
+    int page2_needed = address2 / PAGE_SIZE;
+
+    // Check if the pages are already in physical memory
+    int frame1_idx = find_page_in_memory(system, proc->pid, page1_needed);
+    int frame2_idx = find_page_in_memory(system, proc->pid, page2_needed);
+
+    // 5. Build an ordered list of unique pages that need to be loaded (page faults)
+    int pages_to_load[2];
+    int num_to_load = 0;
+    
+    // The spec says to handle the first page (from the most significant digits) first.
+    if (frame1_idx == -1) {
+        pages_to_load[num_to_load++] = page1_needed;
+    }
+    if (frame2_idx == -1) {
+        // Only add the second page if it's different from the first one
+        if (page1_needed != page2_needed) {
+            pages_to_load[num_to_load++] = page2_needed;
+        }
+    }
+
+    // Process each page fault
+    for (int i = 0; i < num_to_load; i++) {
+        int page_to_load_now = pages_to_load[i];
+        
+        int free_frame_idx = find_free_frame(system);
+        if (free_frame_idx != -1) {
+            // Best case: A free frame is available
+            load_page_into_frame(system, free_frame_idx, proc->pid, page_to_load_now, system->current_time);
+        } else {
+            // No free frames, so we must find a victim page using LRU.
+
+            int victim_idx = -1;
+            int min_access_time = INT_MAX;
+
+            for (int j = 0; j < NUM_FRAMES; j++) {
+                bool is_locked = false;
+
+                if (page1_needed != page2_needed) {
+                     if (page_to_load_now == page1_needed && frame2_idx != -1 && j == frame2_idx) {
+                        is_locked = true;
+                     } else if (page_to_load_now == page2_needed && frame1_idx != -1 && j == frame1_idx) {
+                        is_locked = true;
+                     }
+                }
+                
+                if (is_locked) {
+                    continue; // This frame cannot be a victim.
+                }
+
+                // LRU logic to find the victim with the tie-breaker
+                if (system->physical_memory[j].last_access_time < min_access_time) {
+                    min_access_time = system->physical_memory[j].last_access_time;
+                    victim_idx = j;
+                } else if (system->physical_memory[j].last_access_time == min_access_time) {
+                    if (victim_idx == -1 || system->physical_memory[j].frame_id < system->physical_memory[victim_idx].frame_id) {
+                        victim_idx = j;
+                    }
+                }
+            }
+            
+            if (victim_idx != -1) {
+                load_page_into_frame(system, victim_idx, proc->pid, page_to_load_now, system->current_time);
+            }
+        }
+    }
+
+    frame1_idx = find_page_in_memory(system, proc->pid, page1_needed);
+    frame2_idx = find_page_in_memory(system, proc->pid, page2_needed);
+
+    if (frame1_idx != -1) {
+        system->physical_memory[frame1_idx].last_access_time = system->current_time;
+    }
+    if (frame2_idx != -1) {
+        system->physical_memory[frame2_idx].last_access_time = system->current_time;
+    }
+    
+    return 1;
+}
+
 // Terminating a process moves it to the EXIT state
 void terminate_process(SimulationSystem* system, PCB* proc, const char* reason) {
     proc->state = EXIT;
@@ -147,10 +243,12 @@ PCB *create_new_process(SimulationSystem *system, int prog_id) {
     int length = system->program_lengths[prog_id];
     new_process->instruction_count = length;
     new_process->instructions = (int *)malloc(length * sizeof(int));
+
     if (!new_process->instructions) {
         free(new_process);
         return NULL;
     }
+
     memcpy(new_process->instructions, system->programs[prog_id], length * sizeof(int));
     system->processes[new_process->pid - 1] = new_process;
     return new_process;
@@ -167,6 +265,7 @@ void update_blocked_processes(SimulationSystem *system) {
             to_ready[ready_count++] = proc;
         }
     }
+    
     for (int i = 0; i < ready_count; i++) {
         PCB *proc = to_ready[i];
         if (removeNodeByData(system->blocked_queue, proc)) {
@@ -386,11 +485,17 @@ void run_simulation(SimulationSystem *system) {
                 error_reason = "SIGEOF";
             } else {
                 int instruction = proc->instructions[proc->pc];
-                if (instruction >= 1000 && instruction <= 15999) {
+                if (instruction >= 1000 && instruction <= 15999) { // LOAD/STORE
                     if (!handle_memory_access(system, proc, instruction - 1000)) {
                         error_occurred = true;
                         error_reason = "SIGSEGV";
                     }
+                } else if (instruction >= 1000000000 && instruction <= 2109999999) { // SWAP/MEMCPY
+                    if (!handle_swap_memcopy(system, proc, instruction)) {
+                        error_occurred = true;
+                        error_reason = "SIGSEGV";
+                    }
+
                 } else if (instruction >= 1 && instruction <= 100) {
                     if (proc->pc + instruction >= proc->instruction_count) {
                         error_occurred = true;
@@ -426,22 +531,33 @@ void run_simulation(SimulationSystem *system) {
                     terminate_process(system, proc, NULL);
                 } else if (instruction >= 1000 && instruction <= 15999) { // LOAD/STORE
                     proc->pc++;
+
+                } else if (instruction >= 1000000000 && instruction <= 2109999999) { // SWAP/MEMCPY
+                    proc->pc++;
+
                 } else if (instruction >= 1 && instruction <= 100) { // JUMPF
                     proc->pc += instruction;
+
                 } else if (instruction >= 101 && instruction <= 199) { // JUMPB
                     proc->pc -= (instruction - 100);
+
                 } else if (instruction >= 201 && instruction <= 299) { // EXEC
                     int program_id = (instruction % 100) - 1;
+
                     if (system->next_pid <= MAX_PROCESSES && program_id >= 0 && program_id < 5) {
                         PCB *new_proc = create_new_process(system, program_id);
                         if (new_proc) enqueue(system->new_queue, new_proc);
                     }
+
                     proc->pc++;
+
                 } else if (instruction < 0) { // BLOCK
+
                     proc->state = BLOCKED;
                     proc->blocked_until = system->current_time + (-instruction) + 1;
                     enqueue(system->blocked_queue, proc);
                     system->running_process = NULL;
+                    
                 } else { // Unknown instruction, treat as NOP
                     proc->pc++;
                 }
